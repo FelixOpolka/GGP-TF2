@@ -2,9 +2,9 @@ import numpy as np
 import gpflow
 import tensorflow as tf
 from gpflow.mean_functions import Constant
-from gpflow.models import SVGP
 from scipy.cluster.vq import kmeans2
 
+from GraphSVGP import GraphSVGP
 from graph_kernel import GraphPolynomial, NodeInducingPoints
 from utils import load_dataset
 
@@ -12,7 +12,7 @@ from utils import load_dataset
 def training_step(X_train, y_train, optimizer, gprocess):
     with tf.GradientTape(watch_accessed_variables=False) as tape:
         tape.watch(gprocess.trainable_variables)
-        objective = -gprocess.elbo(X_train, y_train)
+        objective = -gprocess.elbo((X_train, y_train))
         gradients = tape.gradient(objective, gprocess.trainable_variables)
     optimizer.apply_gradients(zip(gradients, gprocess.trainable_variables))
     return objective
@@ -35,7 +35,7 @@ def run_training():
     num_classes = len(np.unique(node_labels))
 
     # Init kernel
-    kernel = GraphPolynomial(adj_matrix, node_feats)
+    kernel = GraphPolynomial(adj_matrix, node_feats, idx_train)
 
     # Init inducing points
     inducing_points = kmeans2(node_feats, len(idx_train), minit='points')[0]    # use as many inducing points as training samples
@@ -43,9 +43,9 @@ def run_training():
 
     # Init GP model
     mean_function = Constant()
-    gprocess = SVGP(kernel, gpflow.likelihoods.MultiClass(num_classes),
-                    inducing_points, mean_function=mean_function,
-                    num_latent=num_classes, whiten=True, q_diag=False)
+    gprocess = GraphSVGP(kernel, gpflow.likelihoods.MultiClass(num_classes),
+                         inducing_points, mean_function=mean_function,
+                         num_latent_gps=num_classes, whiten=True, q_diag=False)
 
     # Init optimizer
     optimizer = tf.optimizers.Adam()

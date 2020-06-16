@@ -151,5 +151,16 @@ def sparse_mat_to_sparse_tensor(sparse_mat):
     return tensor
 
 
+def get_submatrix(adj_matrix, node_idcs):
+    """
+    Returns indices of nodes that are neighbors of any of the nodes in
+    node_idcs.
+    """
+    adj_matrix[np.diag_indices(adj_matrix.shape[0])] = 1.0
+    sub_mat = adj_matrix[node_idcs, :].tocoo()
+    rel_node_idcs = np.unique(sub_mat.col)
+    return rel_node_idcs
+
+
 if __name__ == '__main__':
     load_dataset("cora", float_type=np.float64)

@@ -5,7 +5,7 @@ from gpflow.inducing_variables.inducing_variables import InducingPointsBase
 from gpflow import covariances as cov
 import tensorflow as tf
 
-from utils import sparse_mat_to_sparse_tensor
+from utils import sparse_mat_to_sparse_tensor, get_submatrix
 
 
 class GraphPolynomial(gpflow.kernels.base.Kernel):
@@ -15,9 +15,9 @@ class GraphPolynomial(gpflow.kernels.base.Kernel):
     Learning with Graph Gaussian Processes".
     """
 
-    def __init__(self, sparse_adj_mat, feature_mat, degree=3.0, variance=1.0,
-                 offset=1.0):
-        super().__init__([1])
+    def __init__(self, sparse_adj_mat, feature_mat, idx_train, degree=3.0,
+                 variance=1.0, offset=1.0):
+        super().__init__(None)
         self.degree = degree
         self.offset = Parameter(offset, transform=gpflow.utilities.positive())
         self.variance = Parameter(variance, transform=gpflow.utilities.positive())
@@ -27,6 +27,43 @@ class GraphPolynomial(gpflow.kernels.base.Kernel):
         self.sparse_P = sparse_mat_to_sparse_tensor(sparse_adj_mat)
         self.sparse_P = self.sparse_P / sparse_adj_mat.sum(axis=1)
         self.feature_mat = feature_mat
+        # Compute data required for efficient computation of training
+        # covariance matrix.
+        (self.tr_feature_mat, self.tr_sparse_P,
+         self.idx_train_relative) = self._compute_train_data(
+            sparse_adj_mat, idx_train, feature_mat,
+            tf.sparse.to_dense(self.sparse_P).numpy())
+
+    def _compute_train_data(self, adj_matrix, train_idcs, feature_mat,
+                            conv_mat):
+        """
+        Computes all the variables required for computing the covariance matrix
+        for training in a computationally efficient way. The idea is to cut out
+        those features from the original feature matrix that are required for
+        predicting the training labels, which are the training nodes' features
+        and their neihbors' features.
+        :param adj_matrix: Original dense adjacency matrix of the graph.
+        :param train_idcs: Indices of the training nodes.
+        :param feature_mat: Original dense feature matrix.
+        :param conv_mat: Original matrix used for computing the graph
+        convolutions.
+        :return: Cut outs of only the relevant nodes.
+            - Feature matrix containing features of only the "relevant" nodes,
+            i.e. the training nodes and their neighbors. Shape [num_rel,
+            num_feats].
+            - Convolutional matrix for only the relevant nodes. Shape [num_rel,
+            num_rel].
+            - Indices of the training nodes within the relevant nodes. Shape
+            [num_rel].
+        """
+        sub_node_idcs = get_submatrix(adj_matrix, train_idcs)
+        # Compute indices of actual train nodes (excluding their neighbours)
+        # within the sub node indices
+        relative_train_idcs = np.isin(sub_node_idcs, train_idcs)
+        relative_train_idcs = np.where(relative_train_idcs == True)[0]
+        return (feature_mat[sub_node_idcs],
+                conv_mat[sub_node_idcs, :][:, sub_node_idcs],
+                relative_train_idcs)
 
     def K(self, X, Y=None, presliced=False):
         X = tf.reshape(tf.cast(X, tf.int32), [-1])
@@ -41,6 +78,17 @@ class GraphPolynomial(gpflow.kernels.base.Kernel):
 
     def K_diag(self, X, presliced=False):
         return tf.linalg.diag_part(self.K(X))
+
+    def K_diag_tr(self):
+        base_cov = (self.variance * tf.matmul(self.tr_feature_mat, self.tr_feature_mat, transpose_b=True) + self.offset) ** self.degree
+        if self.sparse:
+            cov = tf.sparse.sparse_dense_matmul(self.tr_sparse_P, base_cov)
+            cov = tf.sparse.sparse_dense_matmul(self.tr_sparse_P, cov, adjoint_b=True)
+        else:
+            cov = tf.matmul(self.tr_sparse_P, base_cov)
+            cov = tf.matmul(self.tr_sparse_P, cov, adjoint_b=True)
+        cov = tf.gather(tf.gather(cov, self.idx_train_relative, axis=0), self.idx_train_relative, axis=1)
+        return tf.linalg.diag_part(cov)
 
 
 class NodeInducingPoints(InducingPointsBase):
